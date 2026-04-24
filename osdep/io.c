@@ -770,6 +770,11 @@ void *mp_dlsym(void *handle, const char *symbol)
     return (void *)addr;
 }
 
+int mp_dlclose(void *handle)
+{
+    return CloseHandle(handle);
+}
+
 char *mp_dlerror(void)
 {
     static mp_once once_init_dlerror = MP_STATIC_ONCE_INITIALIZER;

@@ -59,9 +59,14 @@ dch --local +feld 'add sub-snap and sub-pause features'
 dpkg-buildpackage -b -uc -us
 
 # Install our freshly built mpv + libmpv and pin them so upgrades won't clobber.
+# Unhold first (a previously pinned build blocks the change) and install with
+# dpkg -i: every build carries the same +feld version, and apt refuses to
+# reinstall a same-version held package ("Held packages were changed"), whereas
+# dpkg -i reinstalls it unconditionally.
 cd ..
-sudo apt-get install -y --allow-downgrades ./mpv_*.deb ./libmpv[0-9]_*.deb
 HOLD="mpv $(ls ./libmpv[0-9]_*.deb 2>/dev/null | sed -E 's#.*/(libmpv[0-9]+)_.*#\1#' | sort -u)"
+sudo apt-mark unhold $HOLD 2>/dev/null || true
+sudo dpkg -i ./mpv_*.deb ./libmpv[0-9]_*.deb
 sudo apt-mark hold $HOLD
 echo ">> installed: $(mpv --version | head -1)"
 echo ">> held: $HOLD"

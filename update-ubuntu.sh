@@ -13,7 +13,6 @@
 #
 set -euo pipefail
 
-UPSTREAM=https://github.com/mpv-player/mpv
 FEATURES=(sub-snap sub-pause-mode)
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,15 +24,18 @@ UPV="$(printf '%s' "$VER" | sed -E 's/^[0-9]+://; s/[-+~].*$//')"
 TAG="v$UPV"
 echo ">> distro mpv $VER  (upstream $UPV, tag $TAG)"
 
-# Generate our two patches from the feature branches, against the release tag.
-# Fetch only what we need -- the release tag and the two feature tips, shallow --
-# so this works from a lightweight clone and tolerates a flaky network (the fork
-# carries all of mpv's history, none of which is needed here).
-git -C "$REPO" fetch --quiet --depth 1 "$UPSTREAM" "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
-git -C "$REPO" fetch --quiet --depth 1 origin "${FEATURES[@]}"
+# Generate our two patches from the feature branches. Fetch only the two feature
+# tips plus their parent (the release commit) -- shallow (depth 2), into proper
+# remote-tracking refs -- so this works from a lightweight, single-branch clone
+# and never pulls the fork's full history over a flaky network. Each feature is
+# a single commit on the release tag, so `format-patch -1` is its diff vs the
+# release; no separate tag fetch is needed.
+refspecs=()
+for b in "${FEATURES[@]}"; do refspecs+=("+refs/heads/$b:refs/remotes/origin/$b"); done
+git -C "$REPO" fetch --quiet --depth 2 origin "${refspecs[@]}"
 PATCHES="$(mktemp -d)"
 for b in "${FEATURES[@]}"; do
-    git -C "$REPO" format-patch --quiet -o "$PATCHES" "$TAG..origin/$b"
+    git -C "$REPO" format-patch -1 --quiet -o "$PATCHES" "origin/$b"
 done
 ls -1 "$PATCHES"
 

@@ -20,14 +20,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(git -C "$HERE" rev-parse --show-toplevel)"
 
 # Upstream version the distro currently ships (e.g. 0.41.0-2ubuntu4 -> 0.41.0).
-VER="$(apt-cache policy mpv | awk '/Candidate:/{print $2}')"
+VER="$(apt policy mpv 2>/dev/null | awk '/Candidate:/{print $2}')"
 UPV="$(printf '%s' "$VER" | sed -E 's/^[0-9]+://; s/[-+~].*$//')"
 TAG="v$UPV"
 echo ">> distro mpv $VER  (upstream $UPV, tag $TAG)"
 
 # Generate our two patches from the feature branches, against the release tag.
-git -C "$REPO" fetch --quiet "$UPSTREAM" "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
-git -C "$REPO" fetch --quiet origin
+# Fetch only what we need -- the release tag and the two feature tips, shallow --
+# so this works from a lightweight clone and tolerates a flaky network (the fork
+# carries all of mpv's history, none of which is needed here).
+git -C "$REPO" fetch --quiet --depth 1 "$UPSTREAM" "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+git -C "$REPO" fetch --quiet --depth 1 origin "${FEATURES[@]}"
 PATCHES="$(mktemp -d)"
 for b in "${FEATURES[@]}"; do
     git -C "$REPO" format-patch --quiet -o "$PATCHES" "$TAG..origin/$b"
@@ -35,10 +38,10 @@ done
 ls -1 "$PATCHES"
 
 # Build dependencies and the exact source the distro builds from.
-sudo apt-get -y build-dep mpv
+sudo apt -y build-dep mpv
 WORK="$(mktemp -d)"; cd "$WORK"
-if ! apt-get source mpv; then
-    echo "!! 'apt-get source mpv' failed -- enable deb-src (Types: deb deb-src)"
+if ! apt source mpv; then
+    echo "!! 'apt source mpv' failed -- enable deb-src (Types: deb deb-src)"
     echo "   in /etc/apt/sources.list.d/ubuntu.sources, then 'sudo apt update'."
     exit 1
 fi
@@ -55,7 +58,7 @@ dpkg-buildpackage -b -uc -us
 
 # Install our freshly built mpv + libmpv and pin them so upgrades won't clobber.
 cd ..
-sudo apt-get install -y --allow-downgrades ./mpv_*.deb ./libmpv[0-9]_*.deb
+sudo apt install -y --allow-downgrades ./mpv_*.deb ./libmpv[0-9]_*.deb
 HOLD="mpv $(ls ./libmpv[0-9]_*.deb 2>/dev/null | sed -E 's#.*/(libmpv[0-9]+)_.*#\1#' | sort -u)"
 sudo apt-mark hold $HOLD
 echo ">> installed: $(mpv --version | head -1)"

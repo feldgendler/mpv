@@ -43,12 +43,22 @@ If the rebase hits a conflict, resolve it once; that's the only hand-work.
 
 ## After a fresh OS install
 
+macOS:
+
 ```sh
-git clone https://github.com/feldgendler/mpv
-cd mpv
+git clone https://github.com/feldgendler/mpv && cd mpv
 git switch dogfood        # these scripts
-./update-macos.sh         # macOS: recreates the tap, builds, installs
-# or, on Ubuntu (enable deb-src first — see update-ubuntu.sh header):
+./update-macos.sh         # recreates the tap, builds, installs
+```
+
+Ubuntu (enable deb-src first — see the `update-ubuntu.sh` header):
+
+```sh
+# A lightweight clone is enough: the script fetches only the release tag and the
+# two feature tips (shallow). The fork carries all of mpv's history, so a full
+# clone is large and pointless here.
+git clone --depth 1 --single-branch --branch dogfood \
+    https://github.com/feldgendler/mpv && cd mpv
 ./update-ubuntu.sh
 ```
 
@@ -65,7 +75,7 @@ the Homebrew tap from `homebrew/mpv.rb`).
   stable patch list straight from this file.
 - **Ubuntu:** nothing to maintain — `update-ubuntu.sh` always pulls the distro's
   current source and packaging via `apt source`, and only injects the two
-  patches. The version it targets is read from `apt-cache policy mpv`.
+  patches. The version it targets is read from `apt policy mpv`.
 
 ## Reverting to stock
 

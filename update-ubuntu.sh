@@ -9,7 +9,7 @@
 # branches onto the new release tag (see README.md). Then run this.
 #
 # Requires source packages: add "deb-src" to the Types line in
-# /etc/apt/sources.list.d/ubuntu.sources and run `sudo apt update` once.
+# /etc/apt/sources.list.d/ubuntu.sources and run `sudo apt-get update` once.
 #
 set -euo pipefail
 
@@ -19,7 +19,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(git -C "$HERE" rev-parse --show-toplevel)"
 
 # Upstream version the distro currently ships (e.g. 0.41.0-2ubuntu4 -> 0.41.0).
-VER="$(apt policy mpv 2>/dev/null | awk '/Candidate:/{print $2}')"
+VER="$(apt-cache policy mpv | awk '/Candidate:/{print $2}')"
 UPV="$(printf '%s' "$VER" | sed -E 's/^[0-9]+://; s/[-+~].*$//')"
 TAG="v$UPV"
 echo ">> distro mpv $VER  (upstream $UPV, tag $TAG)"
@@ -40,11 +40,11 @@ done
 ls -1 "$PATCHES"
 
 # Build dependencies and the exact source the distro builds from.
-sudo apt -y build-dep mpv
+sudo apt-get -y build-dep mpv
 WORK="$(mktemp -d)"; cd "$WORK"
-if ! apt source mpv; then
-    echo "!! 'apt source mpv' failed -- enable deb-src (Types: deb deb-src)"
-    echo "   in /etc/apt/sources.list.d/ubuntu.sources, then 'sudo apt update'."
+if ! apt-get source mpv; then
+    echo "!! 'apt-get source mpv' failed -- enable deb-src (Types: deb deb-src)"
+    echo "   in /etc/apt/sources.list.d/ubuntu.sources, then 'sudo apt-get update'."
     exit 1
 fi
 cd mpv-*/
@@ -60,7 +60,7 @@ dpkg-buildpackage -b -uc -us
 
 # Install our freshly built mpv + libmpv and pin them so upgrades won't clobber.
 cd ..
-sudo apt install -y --allow-downgrades ./mpv_*.deb ./libmpv[0-9]_*.deb
+sudo apt-get install -y --allow-downgrades ./mpv_*.deb ./libmpv[0-9]_*.deb
 HOLD="mpv $(ls ./libmpv[0-9]_*.deb 2>/dev/null | sed -E 's#.*/(libmpv[0-9]+)_.*#\1#' | sort -u)"
 sudo apt-mark hold $HOLD
 echo ">> installed: $(mpv --version | head -1)"

@@ -19,8 +19,8 @@ These two branches are the single source of truth. Everything else (the
 | `dogfood` | this branch — scripts only, no mpv source |
 
 There is intentionally **no Ubuntu branch**: dpkg builds locally from
-`apt source` + patches generated from the feature branches, so nothing needs to
-be hosted for it (unlike Homebrew, which clones a git branch over HTTP).
+`apt-get source` + patches generated from the feature branches, so nothing needs
+to be hosted for it (unlike Homebrew, which clones a git branch over HTTP).
 
 ## Routine update (new upstream release)
 
@@ -74,10 +74,10 @@ the Homebrew tap from `homebrew/mpv.rb`).
   `homebrew-build`, and commit. `update-macos.sh` reads the release tag and
   stable patch list straight from this file.
 - **Ubuntu:** nothing to maintain — `update-ubuntu.sh` always pulls the distro's
-  current source and packaging via `apt source`, and only injects the two
-  patches. The version it targets is read from `apt policy mpv`.
+  current source and packaging via `apt-get source`, and only injects the two
+  patches. The version it targets is read from `apt-cache policy mpv`.
 
 ## Reverting to stock
 
 - **macOS:** `brew uninstall feldgendler/dogfood/mpv && brew install mpv`
-- **Ubuntu:** `sudo apt-mark unhold mpv libmpv2 && sudo apt install --reinstall --allow-downgrades mpv libmpv2`
+- **Ubuntu:** `sudo apt-mark unhold mpv libmpv2 && sudo apt-get install --reinstall --allow-downgrades mpv libmpv2`

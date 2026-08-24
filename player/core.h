@@ -85,6 +85,22 @@ enum seek_flags {
     MPSEEK_FLAG_NOFLUSH = 1 << 1, // keeping remaining data for seamless loops
 };
 
+// State of a "sub-snap" seek in progress; see cmd_seek() and
+// handle_sub_snap().
+struct sub_snap_state {
+    int steps;                      // subtitle events still to step over
+    double base;                    // position the next step starts from
+    double amount;                  // signed seek window per step
+    enum seek_precision precision;
+    bool moved;                     // base is a target, not a play position
+    bool waiting;                   // waiting for the decoder to catch up
+    bool rewound;                   // the demuxer was moved back for this chain
+    bool queued;                    // the seek it queued has not run yet
+    double frontier;                // decoder read position at the last poll
+    int stalled;                    // polls without the frontier advancing
+    int64_t deadline;
+};
+
 struct seek_params {
     enum seek_type type;
     enum seek_precision exact;
@@ -406,6 +422,8 @@ typedef struct MPContext {
     int64_t last_time;
 
     struct seek_params seek;
+
+    struct sub_snap_state sub_snap;
 
     /* Heuristic for relative chapter seeks: keep track which chapter
      * the user wanted to go to, even if we aren't exactly within the

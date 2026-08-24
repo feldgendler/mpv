@@ -5619,6 +5619,268 @@ void mp_cmd_msg(struct mp_cmd_ctx *cmd, int status, const char *msg, ...)
     talloc_free(s);
 }
 
+// Bit in the seek command's flags for the "sub-snap" modifier.
+#define SEEK_FLAG_SUB_SNAP 64
+
+// How long a snap waits for subtitles to decode, and how often it looks.
+#define SUB_SNAP_TIMEOUT_MS 500
+#define SUB_SNAP_POLL_S 0.005
+// Polls without the decoder advancing after which its region counts as read.
+#define SUB_SNAP_STALL_POLLS 10
+
+// Move *pts onto the first frame that actually shows the subtitle starting at
+// *pts: an exact seek lands on the frame at or before it, which is the last one
+// *without* the line. Without video, use the same fixed offset as
+// cmd_sub_step_seek().
+static void sub_snap_frame_nudge(struct MPContext *mpctx, double *pts)
+{
+    struct track *vtrack = mpctx->current_track[0][STREAM_VIDEO];
+    if (!vtrack || vtrack->image) {
+        *pts += SUB_SEEK_WITHOUT_VIDEO_OFFSET - SUB_SEEK_OFFSET;
+    } else {
+        double fps = vtrack->stream ? vtrack->stream->codec->fps : 0;
+        *pts += fps > 0 ? 1.0 / fps : SUB_SEEK_OFFSET;
+    }
+}
+
+// The primary subtitle decoder, if snapping to it makes sense at all.
+static struct dec_sub *sub_snap_dec(struct MPContext *mpctx)
+{
+    struct track *track = mpctx->current_track[0][STREAM_SUB];
+    if (!track || !track->d_sub || mpctx->play_dir < 0 ||
+        !mpctx->opts->subs_shared->sub_visibility[0])
+        return NULL;
+    return track->d_sub;
+}
+
+enum sub_snap_result {
+    SUB_SNAP_FOUND,     // an event within the seek amount
+    SUB_SNAP_TOO_FAR,   // an event, but farther away than a plain seek
+    SUB_SNAP_UNKNOWN,   // nothing found; more decoded subtitles may change that
+};
+
+// Look for the adjacent primary subtitle event in the seek direction among the
+// ones the decoder has read, and store the seek target in *target. Telling
+// TOO_FAR from UNKNOWN is what keeps an ordinary seek through a stretch without
+// subtitles from waiting for events that are not going to turn up.
+static enum sub_snap_result sub_snap_step(struct MPContext *mpctx,
+                                          double refpts, double amount,
+                                          double *target)
+{
+    struct dec_sub *sub = sub_snap_dec(mpctx);
+    if (!sub || refpts == MP_NOPTS_VALUE)
+        return SUB_SNAP_UNKNOWN;
+
+    // A backward step keys off event end times (ass_step_sub semantics): from
+    // inside a line it goes to the previous line, from a gap to the one behind.
+    double a[2] = {refpts, amount < 0 ? -1 : 1};
+    if (sub_control(sub, SD_CTRL_SUB_STEP, a) <= 0)
+        return SUB_SNAP_UNKNOWN;
+
+    // Nudge first: it moves the target by up to a frame, which both checks
+    // below must account for, or a backward snap can end up seeking forward.
+    double stepped = a[0];
+    sub_snap_frame_nudge(mpctx, &a[0]);
+
+    // SD_CTRL_SUB_STEP can report success without moving: sd_lavc returns its
+    // input when it has no adjacent event decoded. Test that before nudging,
+    // which always moves forward and would hide it.
+    if (amount > 0 ? stepped <= refpts : stepped >= refpts)
+        return SUB_SNAP_UNKNOWN;
+    // The nudge can push a backward target past the play position.
+    if (amount < 0 && a[0] >= refpts)
+        return SUB_SNAP_UNKNOWN;
+    if (fabs(a[0] - refpts) >= fabs(amount))
+        return SUB_SNAP_TOO_FAR;
+
+    *target = a[0];
+    return SUB_SNAP_FOUND;
+}
+
+// Take as many of the pending steps as the decoded subtitles allow.
+static enum sub_snap_result sub_snap_advance(struct MPContext *mpctx)
+{
+    struct sub_snap_state *st = &mpctx->sub_snap;
+    enum sub_snap_result r = SUB_SNAP_FOUND;
+
+    while (st->steps > 0) {
+        double target;
+        r = sub_snap_step(mpctx, st->base, st->amount, &target);
+        if (r != SUB_SNAP_FOUND)
+            break;
+        st->base = target;
+        st->moved = true;
+        st->steps--;
+    }
+    return r;
+}
+
+// Issue the seek this chain resolved to and forget the chain. Steps that could
+// not be snapped are covered by their plain relative amount.
+static void sub_snap_finish(struct MPContext *mpctx)
+{
+    struct sub_snap_state *st = &mpctx->sub_snap;
+    double rest = st->amount * st->steps;
+
+    if (st->moved) {
+        queue_seek(mpctx, MPSEEK_ABSOLUTE, st->base + rest,
+                   st->steps ? st->precision : MPSEEK_EXACT, MPSEEK_FLAG_DELAY);
+    } else {
+        queue_seek(mpctx, MPSEEK_RELATIVE, rest, st->precision,
+                   MPSEEK_FLAG_DELAY);
+    }
+
+    *st = (struct sub_snap_state){
+        .base = st->base,
+        .moved = st->moved,
+        .queued = true,
+    };
+}
+
+// Only asked once, when the chain starts waiting: a chain already in flight
+// must not be cut short by playback state changing under it.
+static bool sub_snap_can_wait(struct MPContext *mpctx)
+{
+    // A backward chain relies on sub_snap_rewind(), which moves the demuxer,
+    // so it needs playback stopped.
+    return sub_snap_dec(mpctx) &&
+           (mpctx->sub_snap.amount > 0 || mpctx->paused);
+}
+
+// The events a backward chain needs are behind the play position and can not
+// be read ahead: move the *demuxer* (not playback) back to the start of the
+// window the pending steps span, and decode forward from there.
+static bool sub_snap_rewind(struct MPContext *mpctx, struct dec_sub *sub)
+{
+    struct sub_snap_state *st = &mpctx->sub_snap;
+    struct track *track = mpctx->current_track[0][STREAM_SUB];
+    if (!track->demuxer ||
+        !demux_seek(track->demuxer, st->base + st->amount * st->steps, 0))
+    {
+        return false;
+    }
+    sub_reset(sub);
+    st->rewound = true;
+    return true;
+}
+
+static bool sub_snap_chain_valid(struct MPContext *mpctx)
+{
+    struct sub_snap_state *st = &mpctx->sub_snap;
+    return st->queued && mpctx->seek.type == MPSEEK_ABSOLUTE &&
+           mpctx->seek.amount == st->base;
+}
+
+// Start a chain from the position the seek queue is already heading for, so
+// that a snap composes with a pending seek instead of replacing it. False if
+// there is nothing to snap from, leaving an ordinary relative seek.
+static bool sub_snap_start(struct MPContext *mpctx)
+{
+    // Keep track of a seek this chain queued itself, so that mp_seek() knows
+    // to let the pending steps survive it.
+    bool queued = sub_snap_chain_valid(mpctx);
+    double base;
+    bool moved = true;
+
+    switch (mpctx->seek.type) {
+    case MPSEEK_NONE:
+        base = get_current_time(mpctx);
+        moved = false;
+        break;
+    case MPSEEK_ABSOLUTE:
+        base = mpctx->seek.amount;
+        break;
+    case MPSEEK_RELATIVE:
+        base = get_current_time(mpctx) + mpctx->seek.amount;
+        break;
+    default:
+        return false;
+    }
+
+    if (base == MP_NOPTS_VALUE)
+        return false;
+
+    mpctx->sub_snap = (struct sub_snap_state){
+        .base = base,
+        .moved = moved,
+        .queued = queued,
+    };
+    return true;
+}
+
+// Drive the subtitle decoder towards the events a pending snap needs, and
+// resolve the seek once they are there. Called once per playloop iteration.
+void handle_sub_snap(struct MPContext *mpctx)
+{
+    struct sub_snap_state *st = &mpctx->sub_snap;
+    if (!st->waiting)
+        return;
+
+    if (mpctx->seek.type && !sub_snap_chain_valid(mpctx)) {
+        // A seek that is not this chain's own was queued. It is the newer
+        // request, so drop the chain rather than adding the pending steps to
+        // it: queue_seek() would fold them into that seek's amount.
+        *st = (struct sub_snap_state){0};
+        return;
+    }
+
+    struct dec_sub *sub = sub_snap_dec(mpctx);
+    if (!sub) {
+        sub_snap_finish(mpctx);
+        return;
+    }
+
+    // Rewinding resets the reader state of every stream, so it has to wait for
+    // playback to settle, and for the seek this chain queued in particular:
+    // that one moves the demuxer itself and would undo the rewind. Reading
+    // before it has happened is pointless, so just poll on.
+    if (st->amount < 0 && !st->rewound) {
+        if (!mpctx->paused) {
+            // Unpaused since the wait was armed. Rewinding a demuxer shared
+            // with video and audio would pull the ground out from under them.
+            sub_snap_finish(mpctx);
+            return;
+        }
+        if (st->queued || mpctx->video_status < STATUS_READY) {
+            if (mp_time_ns() >= st->deadline)
+                sub_snap_finish(mpctx);
+            else
+                mp_set_timeout(mpctx, SUB_SNAP_POLL_S);
+            return;
+        }
+        if (!sub_snap_rewind(mpctx, sub)) {
+            sub_snap_finish(mpctx);
+            return;
+        }
+    }
+
+    bool packets_read = false, sub_updated = false;
+    sub_read_packets(sub, st->amount > 0 ? st->base + st->amount : st->base,
+                     true, &packets_read, &sub_updated);
+
+    // The decoder is done with the window once its read position stops moving.
+    // Waiting for it to pass a particular timestamp does not work: the read is
+    // bounded by the same timestamp it is asked for.
+    double frontier = sub_get_last_pkt_pts(sub);
+    if (frontier != st->frontier) {
+        st->frontier = frontier;
+        st->stalled = 0;
+    } else if (frontier != MP_NOPTS_VALUE) {
+        // Nothing read at all yet is the demuxer being slow, not a stall.
+        st->stalled++;
+    }
+    bool read = st->stalled >= SUB_SNAP_STALL_POLLS;
+
+    enum sub_snap_result r = sub_snap_advance(mpctx);
+    if (!st->steps || r == SUB_SNAP_TOO_FAR || read ||
+        mp_time_ns() >= st->deadline)
+    {
+        sub_snap_finish(mpctx);
+    } else {
+        mp_set_timeout(mpctx, SUB_SNAP_POLL_S);
+    }
+}
+
 static void cmd_seek(void *p)
 {
     struct mp_cmd_ctx *cmd = p;
@@ -5639,7 +5901,33 @@ static void cmd_seek(void *p)
     mark_seek(mpctx);
     switch (abs) {
     case 0: { // Relative seek
-        queue_seek(mpctx, MPSEEK_RELATIVE, v, precision, MPSEEK_FLAG_DELAY);
+        struct sub_snap_state *st = &mpctx->sub_snap;
+        // Presses accumulate into one chain: input is drained in batches, so
+        // recomputing a target per press would collapse a burst into one step.
+        bool snap = cmd->args[1].v.i & SEEK_FLAG_SUB_SNAP;
+        if (snap && !st->steps && !st->waiting)
+            snap = sub_snap_start(mpctx);
+        if (snap) {
+            st->steps++;
+            st->amount = v;
+            st->precision = precision;
+
+            enum sub_snap_result r = sub_snap_advance(mpctx);
+            if (!st->steps || r == SUB_SNAP_TOO_FAR ||
+                (!st->waiting && !sub_snap_can_wait(mpctx)))
+            {
+                sub_snap_finish(mpctx);
+            } else if (!st->waiting) {
+                st->waiting = true;
+                st->frontier = MP_NOPTS_VALUE;
+                st->stalled = 0;
+                st->deadline =
+                    mp_time_ns() + MP_TIME_MS_TO_NS(SUB_SNAP_TIMEOUT_MS);
+                mp_set_timeout(mpctx, SUB_SNAP_POLL_S);
+            }
+        } else {
+            queue_seek(mpctx, MPSEEK_RELATIVE, v, precision, MPSEEK_FLAG_DELAY);
+        }
         set_osd_function(mpctx, (v > 0) ? OSD_FFW : OSD_REW);
         break;
     }
@@ -7146,7 +7434,8 @@ const struct mp_cmd_def mp_cmds[] = {
                 {"absolute", 4|2},
                 {"relative-percent", 4|3},
                 {"keyframes", 32|8},
-                {"exact", 32|16}),
+                {"exact", 32|16},
+                {"sub-snap", SEEK_FLAG_SUB_SNAP}),
                 OPTDEF_INT(4|0)},
             // backwards compatibility only
             {"legacy", OPT_CHOICE(v.i,

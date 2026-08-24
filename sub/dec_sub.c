@@ -491,6 +491,17 @@ void sub_reset(struct dec_sub *sub)
     mp_mutex_unlock(&sub->lock);
 }
 
+// PTS of the most recent packet read from the demuxer, in the subtitle
+// timebase. Only meaningful compared against itself, as a measure of how far
+// the decoder has advanced.
+double sub_get_last_pkt_pts(struct dec_sub *sub)
+{
+    mp_mutex_lock(&sub->lock);
+    double pts = sub->last_pkt_pts;
+    mp_mutex_unlock(&sub->lock);
+    return pts;
+}
+
 void sub_select(struct dec_sub *sub, bool selected)
 {
     mp_mutex_lock(&sub->lock);

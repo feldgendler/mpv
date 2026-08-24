@@ -53,6 +53,7 @@ char *sub_get_text(struct dec_sub *sub, double pts, enum sd_text_type type);
 char *sub_ass_get_extradata(struct dec_sub *sub);
 struct sd_times sub_get_times(struct dec_sub *sub, double pts);
 void sub_reset(struct dec_sub *sub);
+double sub_get_last_pkt_pts(struct dec_sub *sub);
 void sub_select(struct dec_sub *sub, bool selected);
 void sub_set_recorder_sink(struct dec_sub *sub, struct mp_recorder_sink *sink);
 void sub_set_play_dir(struct dec_sub *sub, int dir);

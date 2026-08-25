@@ -69,6 +69,7 @@ bool sub_ends_between(struct dec_sub *sub, double cur_pts, double next_pts);
 struct sub_lines *sub_get_lines(struct dec_sub *sub);
 
 void sub_reset(struct dec_sub *sub);
+double sub_get_last_pkt_pts(struct dec_sub *sub);
 void sub_select(struct dec_sub *sub, bool selected);
 void sub_set_recorder_sink(struct dec_sub *sub, struct mp_recorder_sink *sink);
 void sub_set_play_dir(struct dec_sub *sub, int dir);

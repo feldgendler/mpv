@@ -609,6 +609,7 @@ static const m_option_t mp_opts[] = {
         M_RANGE(0, INT_MAX)},
 
     {"pause", OPT_BOOL(pause)},
+    {"sub-pause", OPT_BOOL(sub_pause)},
     {"keep-open", OPT_CHOICE(keep_open,
         {"no", 0},
         {"yes", 1},
@@ -1162,6 +1163,7 @@ static const struct MPOpts mp_default_opts = {
         "sub-pos",
         "sub-visibility",
         "sub-scale",
+        "sub-pause",
         "sub-use-margins",
         "sub-ass-force-margins",
         "sub-ass-use-video-data",
